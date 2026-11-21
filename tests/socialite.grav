@@ -1,0 +1,275 @@
+// apogee-socialite's tests: the whole sign-in through the router and a session,
+// against a local identity provider that checks what a real one does (the
+// client secret, single-use codes, the PKCE verifier, bearer tokens): a
+// GitHub-shaped provider (with the private-email lookup), an OpenID Connect
+// issuer found by discovery, refresh tokens, Basic client auth, the state
+// checks, errors, the fake for app tests, and each provider's URLs.
+import "std"
+import "std/net"
+import "apogee-container"
+import "apogee-http"
+import "apogee-routing"
+import "apogee-session"
+import "apogee-testing"
+import "../src/all.grav"
+use apogee.*
+
+// ── a local identity provider ──────────────────────────────────────────────
+class Idp {
+    static base: string = ""
+    // code -> the PKCE challenge it was issued with ("" without PKCE)
+    static codes: HashMap<string, string> = new HashMap<string, string>()
+    static tokens: HashSet<string> = new HashSet<string>()
+    static refreshTokens: HashSet<string> = new HashSet<string>()
+    static basicSeen: bool = false
+    static lock: Mutex = new Mutex()
+    static fn issue(challenge: string) -> string {
+        let c = Hash.randomToken(12)
+        Idp.lock.lock(); Idp.codes.put(c, challenge); Idp.lock.unlock()
+        return c
+    }
+    static fn bad(error: string) -> HttpResponse {
+        let o = Json.object()
+        o.set("error", error)
+        o.set("error_description", "the provider says " + error)
+        return HttpResponse.json(400, o)
+    }
+    static fn authorized(req: HttpRequest) -> bool {
+        let h = req.header("Authorization")
+        Idp.lock.lock()
+        let ok = Str.startsWith(h, "Bearer ") && Idp.tokens.contains(h[7..])
+        Idp.lock.unlock()
+        return ok
+    }
+    static fn start() {
+        if (Idp.base != "") { return }
+        let app = new HttpServer()
+        app.post("/token", fn(req: HttpRequest) -> HttpResponse {
+            let f = req.form()
+            let id = f.getOr("client_id", "")
+            let secret = f.getOr("client_secret", "")
+            let basic = req.header("Authorization")
+            if (Str.startsWith(basic, "Basic ")) {
+                let pair = Str.split(Base64.decode(basic[6..]), ":")
+                id = pair[0]; secret = pair[1]
+                Idp.basicSeen = true
+            }
+            if (id != "client-1" || secret != "s3cret") { return Idp.bad("invalid_client") }
+            let o = Json.object()
+            Idp.lock.lock()
+            if (f.getOr("grant_type", "") == "refresh_token") {
+                let rt = f.getOr("refresh_token", "")
+                if (!Idp.refreshTokens.contains(rt)) { Idp.lock.unlock(); return Idp.bad("invalid_grant") }
+            } else {
+                let code = f.getOr("code", "")
+                if (!Idp.codes.containsKey(code)) { Idp.lock.unlock(); return Idp.bad("invalid_grant") }
+                let challenge = Idp.codes.get(code)
+                Idp.codes.remove(code)                                   // a code works once
+                if (challenge != "" && OAuthProvider.challenge(f.getOr("code_verifier", "")) != challenge) { Idp.lock.unlock(); return Idp.bad("invalid_grant") }
+                if (f.getOr("redirect_uri", "") == "") { Idp.lock.unlock(); return Idp.bad("invalid_request") }
+            }
+            let at = "at-" + Hash.randomToken(8)
+            let rt = "rt-" + Hash.randomToken(8)
+            Idp.tokens.add(at)
+            Idp.refreshTokens.add(rt)
+            Idp.lock.unlock()
+            o.set("access_token", at)
+            o.set("refresh_token", rt)
+            o.set("token_type", "bearer")
+            o.set("expires_in", 3600 as long)
+            o.set("scope", "read:user,user:email")
+            return HttpResponse.json(200, o)
+        })
+        app.get("/user", fn(req: HttpRequest) -> HttpResponse {
+            if (!Idp.authorized(req)) { return HttpResponse.text(401, "no") }
+            return HttpResponse.json(200, Json.parse("{\"id\":42,\"login\":\"ada\",\"name\":\"Ada Lovelace\",\"email\":null,\"avatar_url\":\"https://img.test/ada.png\"}"))
+        })
+        app.get("/user/emails", fn(req: HttpRequest) -> HttpResponse {
+            if (!Idp.authorized(req)) { return HttpResponse.text(401, "no") }
+            return HttpResponse.json(200, Json.parse("[{\"email\":\"old@ada.test\",\"primary\":false,\"verified\":true},{\"email\":\"ada@ada.test\",\"primary\":true,\"verified\":true}]"))
+        })
+        app.get("/.well-known/openid-configuration", fn(req: HttpRequest) -> HttpResponse {
+            let o = Json.object()
+            o.set("issuer", Idp.base)
+            o.set("authorization_endpoint", Idp.base + "/authorize")
+            o.set("token_endpoint", Idp.base + "/token")
+            o.set("userinfo_endpoint", Idp.base + "/userinfo")
+            return HttpResponse.json(200, o)
+        })
+        app.get("/userinfo", fn(req: HttpRequest) -> HttpResponse {
+            if (!Idp.authorized(req)) { return HttpResponse.text(401, "no") }
+            return HttpResponse.json(200, Json.parse("{\"sub\":\"u-7\",\"name\":\"Grace Hopper\",\"preferred_username\":\"grace\",\"email\":\"grace@navy.test\",\"email_verified\":true,\"picture\":\"https://img.test/g.png\"}"))
+        })
+        let s = app.start("127.0.0.1", 0)
+        Idp.base = "http://127.0.0.1:${s.port()}"
+    }
+}
+
+// ── the app ────────────────────────────────────────────────────────────────
+fn app() -> TestClient {
+    Idp.start()
+    Socialite.reset()
+    Socialite.configure("github", "client-1", "s3cret", "http://app.test/auth/github/callback")
+    Socialite.configure("keycloak", "client-1", "s3cret", "http://app.test/auth/keycloak/callback", {"issuer": Idp.base})
+    Socialite.extend("github", fn(c: SocialiteConfig) -> OAuthProvider {
+        let p = new GitHubProvider(c.clientId, c.clientSecret, c.redirect)
+        p.authUrl = Idp.base + "/authorize"
+        p.tokUrl = Idp.base + "/token"
+        p.apiUrl = Idp.base
+        return p
+    })
+    let r = new Router(new Container())
+    r.aliasInstance("session", new StartSession(new SessionManager(new MemorySessionStore(), "test-app-key")))
+    r.middleware(["session"]).group(fn(r: Router) {
+        r.get("/auth/{provider}", fn(req: Request) -> Response { return Socialite.driver(str(req.route("provider"))).redirect(req) })
+        r.get("/auth/{provider}/callback", fn(req: Request) -> Response {
+            try {
+                let u = Socialite.driver(str(req.route("provider"))).user(req)
+                let o = u.toJson()
+                o.set("token", u.token)
+                o.set("refreshToken", u.refreshToken)
+                o.set("expiresIn", u.expiresIn)
+                return new Response(HttpResponse.json(200, o))
+            } catch (e: InvalidStateException) {
+                return Response.json({"error": "state"}, 403)
+            } catch (e: OAuthException) {
+                return Response.json({"error": e.error, "message": e.message()}, 400)
+            }
+        })
+    })
+    return new TestClient(new HttpKernel(r))
+}
+
+fn params(location: string) -> HashMap<string, string> {
+    let out = new HashMap<string, string>()
+    let q = Str.indexOf(location, "?")
+    for (pair in Str.split(location[q + 1..], "&")) {
+        let eq = Str.indexOf(pair, "=")
+        out.put(Url.decode(pair[..eq]), Url.decode(pair[eq + 1..]))
+    }
+    return out
+}
+
+test "signing in with a GitHub-shaped provider" {
+    let c = app()
+    let res = c.get("/auth/github").assertRedirect()
+    let loc = res.header("Location")
+    assert(Str.startsWith(loc, Idp.base + "/authorize?"))
+    let p = params(loc)
+    assertEq(p.get("client_id"), "client-1")
+    assertEq(p.get("redirect_uri"), "http://app.test/auth/github/callback")
+    assertEq(p.get("response_type"), "code")
+    assertEq(p.get("scope"), "read:user user:email")
+    assert(p.get("state").length >= 20)
+    assert(!p.containsKey("code_challenge"))
+    let code = Idp.issue("")
+    let back = c.getJson("/auth/github/callback?code=${code}&state=${p.get("state")}").assertOk()
+    back.assertJsonPath("provider", "github").assertJsonPath("id", "42").assertJsonPath("nickname", "ada").assertJsonPath("name", "Ada Lovelace")
+    back.assertJsonPath("email", "ada@ada.test").assertJsonPath("emailVerified", true).assertJsonPath("avatar", "https://img.test/ada.png")
+    back.assertJsonPath("expiresIn", 3600)
+    assert(Str.startsWith(back.jsonAt("token").asString(), "at-"))
+    // the state is used up: the same callback again fails
+    c.getJson("/auth/github/callback?code=${Idp.issue("")}&state=${p.get("state")}").assertStatus(403)
+}
+
+test "the state must match, and errors come back as OAuthException" {
+    let c = app()
+    let p = params(c.get("/auth/github").header("Location"))
+    c.getJson("/auth/github/callback?code=${Idp.issue("")}&state=forged").assertStatus(403)
+    // another browser (no session) cannot finish someone else's sign-in
+    let other = app()
+    other.getJson("/auth/github/callback?code=${Idp.issue("")}&state=${p.get("state")}").assertStatus(403)
+    c.getJson("/auth/github/callback?error=access_denied&error_description=nope").assertStatus(400).assertJsonPath("error", "access_denied")
+    let p2 = params(c.get("/auth/github").header("Location"))
+    c.getJson("/auth/github/callback?code=never-issued&state=${p2.get("state")}").assertStatus(400).assertJsonPath("error", "invalid_grant")
+}
+
+test "an OpenID Connect issuer by discovery, with PKCE" {
+    let c = app()
+    let loc = c.get("/auth/keycloak").assertRedirect().header("Location")
+    assert(Str.startsWith(loc, Idp.base + "/authorize?"))
+    let p = params(loc)
+    assertEq(p.get("scope"), "openid profile email")
+    assertEq(p.get("code_challenge_method"), "S256")
+    let challenge = p.get("code_challenge")
+    assertEq(challenge.length, 43)
+    let back = c.getJson("/auth/keycloak/callback?code=${Idp.issue(challenge)}&state=${p.get("state")}").assertOk()
+    back.assertJsonPath("provider", "keycloak").assertJsonPath("id", "u-7").assertJsonPath("nickname", "grace").assertJsonPath("email", "grace@navy.test").assertJsonPath("emailVerified", true)
+    // a code issued for another challenge (someone else's verifier) is refused
+    let p2 = params(c.get("/auth/keycloak").header("Location"))
+    c.getJson("/auth/keycloak/callback?code=${Idp.issue(OAuthProvider.challenge("someone else"))}&state=${p2.get("state")}").assertStatus(400).assertJsonPath("error", "invalid_grant")
+    // RFC 7636's example
+    assertEq(OAuthProvider.challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+}
+
+test "refresh tokens, tokens the app already has, stateless, Basic client auth" {
+    app()
+    let gh = Socialite.driver("github")
+    let t = gh.tokens(Idp.issue(""))
+    let fresh = gh.refresh(t.refreshToken)
+    assert(fresh.accessToken != t.accessToken)
+    assertEq(fresh.expiresIn, 3600 as long)
+    assertEq(fresh.scopes.size(), 2)
+    assertEq(gh.userFromToken(fresh.accessToken).email, "ada@ada.test")
+    let threw = false
+    try { gh.refresh("rt-unknown") } catch (e: OAuthException) { threw = e.error == "invalid_grant" }
+    assert(threw)
+    // stateless: no state in the URL, none checked (and no session needed)
+    let s = Socialite.driver("github").stateless()
+    assert(!Str.contains(s.redirectUrlFor(Request.make("GET", "/x", "", "")), "state="))
+    let req = Request.make("GET", "/auth/github/callback?code=" + Idp.issue(""), "", "")
+    assertEq(s.user(req).nickname, "ada")
+    // a client that authenticates with Basic
+    let b = new BitbucketProvider("client-1", "s3cret", "http://app.test/cb")
+    b.tokUrl = Idp.base + "/token"
+    Idp.basicSeen = false
+    assert(b.tokens(Idp.issue("")).accessToken != "")
+    assert(Idp.basicSeen)
+    let wrong = new GitHubProvider("client-1", "wrong", "http://app.test/cb")
+    wrong.tokUrl = Idp.base + "/token"
+    threw = false
+    try { wrong.tokens(Idp.issue("")) } catch (e: OAuthException) { threw = e.error == "invalid_client" }
+    assert(threw)
+}
+
+test "faking a provider in an app's tests" {
+    let c = app()
+    Socialite.fake("github", Socialite.makeUser("9", "fake@app.test", "Faye"))
+    let loc = c.get("/auth/github").assertRedirect().header("Location")
+    assertEq(loc, "http://app.test/auth/github/callback?code=fake")
+    c.getJson("/auth/github/callback?code=fake").assertOk().assertJsonPath("email", "fake@app.test").assertJsonPath("provider", "github").assertJsonPath("token", "fake-token")
+    c.getJson("/auth/github/callback?error=access_denied").assertStatus(400)
+    Socialite.reset()
+}
+
+test "each provider's URLs, scopes and settings" {
+    let req = Request.make("GET", "/x", "", "")
+    let stateless = fn(p: OAuthProvider) -> HashMap<string, string> { return params(p.stateless().redirectUrlFor(req)) }
+    let ms = new MicrosoftProvider("id", "s", "https://a.test/cb", "organizations")
+    assert(Str.startsWith(ms.stateless().redirectUrlFor(req), "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"))
+    assertEq(ms.tokenUrl(), "https://login.microsoftonline.com/organizations/oauth2/v2.0/token")
+    let fb = stateless(new FacebookProvider("id", "s", "https://a.test/cb"))
+    assertEq(fb.get("scope"), "email,public_profile")
+    let gl = new GitLabProvider("id", "s", "https://a.test/cb", "https://git.example.test")
+    assertEq(gl.tokenUrl(), "https://git.example.test/oauth/token")
+    let g = new GoogleProvider("id", "s", "https://a.test/cb")
+    g.offline().domain("example.test")
+    let gp = stateless(g)
+    assertEq(gp.get("access_type"), "offline")
+    assertEq(gp.get("hd"), "example.test")
+    assertEq(stateless(new DiscordProvider("id", "s", "https://a.test/cb").setScopes(["identify"])).get("scope"), "identify")
+    assertEq(stateless(new SlackProvider("id", "s", "https://a.test/cb").addScopes(["openid", "team.read"])).get("scope"), "openid team.read")
+    assertEq(stateless(new LinkedInProvider("id", "s", "https://a.test/cb").with({"prompt": "login"})).get("prompt"), "login")
+    // from configuration
+    Socialite.configure("work", "id", "s", "https://a.test/cb", {"driver": "microsoft", "tenant": "contoso", "scopes": "openid email"})
+    let w = Socialite.driver("work")
+    assertEq(w.name, "microsoft")
+    assertEq(params(w.stateless().redirectUrlFor(req)).get("scope"), "openid email")
+    let threw = false
+    try { Socialite.driver("nobody") } catch (e: ValueError) { threw = true }
+    assert(threw)
+    // the session is needed unless stateless
+    threw = false
+    try { new GitHubProvider("id", "s", "https://a.test/cb").redirectUrlFor(req) } catch (e: StateError) { threw = true }
+    assert(threw)
+}
