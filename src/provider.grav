@@ -1,0 +1,273 @@
+// provider.grav — the OAuth 2 sign-in flow every provider shares: send the
+// browser to the provider with a state (and a PKCE challenge), come back with a
+// code, check the state, trade the code for tokens, ask who signed in.
+//
+//   router.get("/auth/github", fn(req: Request) -> Response { return Socialite.driver("github").redirect(req) })
+//   router.get("/auth/github/callback", fn(req: Request) -> Response {
+//       let who = Socialite.driver("github").user(req)      // who.id, who.email, who.name, who.token…
+//       ...find or create the user, sign them in...
+//   })
+import "std"
+import "apogee-http"
+import "apogee-session"
+import "apogee-http-client"
+
+namespace apogee {
+
+    // The state that came back is not the one sent (or the session lost it).
+    class InvalidStateException extends Exception {
+        constructor(msg: string) { super(msg); }
+        fn kind() -> string { return "InvalidStateException"; }
+    }
+
+    // The provider said no: the user denied access, the code was bad, or a call failed.
+    class OAuthException extends Exception {
+        // The provider's error code ("access_denied", "invalid_grant"…), when it gave one.
+        public error: string
+        constructor(error: string, msg: string) { super(msg); self.error = error; }
+        fn kind() -> string { return "OAuthException"; }
+    }
+
+    // What a token endpoint answered.
+    class TokenSet {
+        public accessToken: string = ""
+        public refreshToken: string = ""
+        public idToken: string = ""
+        public tokenType: string = "Bearer"
+        // Seconds the access token lasts (0: not said).
+        public expiresIn: long = 0
+        public scopes: Array<string> = new Array<string>()
+        public raw: JsonValue = Json.object()
+        static fn of(j: JsonValue, separator: string) -> TokenSet {
+            let t = new TokenSet();
+            t.raw = j;
+            t.accessToken = j.getString("access_token", "");
+            t.refreshToken = j.getString("refresh_token", "");
+            t.idToken = j.getString("id_token", "");
+            t.tokenType = j.getString("token_type", "Bearer");
+            let e = j.get("expires_in");
+            if (e != null) { t.expiresIn = e.isString() ? Integer.parseOr(e.asString(), 0) : e.asLong(); }
+            let s = j.get("scope");
+            if (s != null && s.isString()) {
+                for (x in Str.split(Str.replace(s.asString(), ",", " "), " ")) { if (x != "") { t.scopes.push(x); } }
+            }
+            return t;
+        }
+    }
+
+    // Who signed in, as the provider describes them.
+    class SocialUser {
+        public id: string = ""
+        public nickname: string = ""
+        public name: string = ""
+        public email: string = ""
+        public emailVerified: bool = false
+        public avatar: string = ""
+        public token: string = ""
+        public refreshToken: string = ""
+        public expiresIn: long = 0
+        public scopes: Array<string> = new Array<string>()
+        // Which provider ("github", "google"…).
+        public provider: string = ""
+        // Everything the provider said about them.
+        public raw: JsonValue = Json.object()
+        fn withTokens(t: TokenSet) -> SocialUser {
+            self.token = t.accessToken;
+            self.refreshToken = t.refreshToken;
+            self.expiresIn = t.expiresIn;
+            self.scopes = t.scopes;
+            return self;
+        }
+        fn toJson() -> JsonValue {
+            let o = Json.object();
+            o.set("provider", self.provider);
+            o.set("id", self.id);
+            o.set("nickname", self.nickname);
+            o.set("name", self.name);
+            o.set("email", self.email);
+            o.set("emailVerified", self.emailVerified);
+            o.set("avatar", self.avatar);
+            return o;
+        }
+    }
+
+    // An OAuth 2 provider. A provider says where to send the browser
+    // (authorizeUrl), where to trade the code (tokenUrl) and how to read who
+    // signed in (fetchUser and mapUser); everything else is here.
+    class OAuthProvider {
+        public name: string
+        public clientId: string
+        public clientSecret: string
+        public redirectUrl: string
+        public scopes: Array<string> = new Array<string>()
+        public scopeSeparator: string = " "
+        // Extra query parameters for the authorize URL (prompt, hd, login_hint…).
+        public parameters: HashMap<string, string> = new HashMap<string, string>()
+        // No session: no state check (APIs, mobile apps that check it themselves).
+        public isStateless: bool = false
+        // PKCE (S256): on for providers that take it.
+        public usesPkce: bool = false
+        // How the client authenticates to the token endpoint: "post" (in the body) or "basic".
+        public clientAuth: string = "post"
+        public timeoutMs: int = 15000
+        constructor(name: string, clientId: string, clientSecret: string, redirectUrl: string) {
+            self.name = name; self.clientId = clientId; self.clientSecret = clientSecret; self.redirectUrl = redirectUrl;
+        }
+
+        // ── what each provider says ────────────────────────────────────────────
+        fn authorizeUrl() -> string { throw new StateError(self.name + ": no authorize URL"); }
+        fn tokenUrl() -> string { throw new StateError(self.name + ": no token URL"); }
+        // Who the token belongs to, as the provider's JSON.
+        fn fetchUser(token: string) -> JsonValue { throw new StateError(self.name + ": cannot fetch the user"); }
+        fn mapUser(j: JsonValue) -> SocialUser { throw new StateError(self.name + ": cannot read the user"); }
+        // Scopes asked for when none are set.
+        fn defaultScopes() -> Array<string> { return new Array<string>(); }
+
+        // ── settings, chained ──────────────────────────────────────────────────
+        fn setScopes(s: Array<string>) -> OAuthProvider { self.scopes = s.copy(); return self; }
+        fn addScopes(s: Array<string>) -> OAuthProvider {
+            for (x in s) { if (!self.scopes.contains(x)) { self.scopes.push(x); } }
+            return self;
+        }
+        fn with(params: HashMap<string, string>) -> OAuthProvider { for ((k, v) in params) { self.parameters.put(k, v); } return self; }
+        fn stateless() -> OAuthProvider { self.isStateless = true; return self; }
+        fn redirectTo(url: string) -> OAuthProvider { self.redirectUrl = url; return self; }
+        fn withPkce(on: bool = true) -> OAuthProvider { self.usesPkce = on; return self; }
+
+        // ── the flow ───────────────────────────────────────────────────────────
+        // Where to send the browser (and what to remember in the session).
+        fn redirect(req: Request) -> Response { return Response.redirect(self.redirectUrlFor(req)); }
+        fn redirectUrlFor(req: Request) -> string {
+            let q = new HashMap<string, string>();
+            q.put("client_id", self.clientId);
+            q.put("redirect_uri", self.redirectUrl);
+            q.put("response_type", "code");
+            let scopes = self.scopes.size() > 0 ? self.scopes : self.defaultScopes();
+            if (scopes.size() > 0) { q.put("scope", Str.join(scopes, self.scopeSeparator)); }
+            if (!self.isStateless) {
+                let state = Hash.randomToken(20);
+                q.put("state", state);
+                self.session(req).put(self.key("state"), state);
+            }
+            // (PKCE keeps its verifier in the session, so a stateless flow goes without)
+            if (self.usesPkce && !self.isStateless) {
+                let verifier = Hash.randomToken(32);
+                q.put("code_challenge", OAuthProvider.challenge(verifier));
+                q.put("code_challenge_method", "S256");
+                self.session(req).put(self.key("verifier"), verifier);
+            }
+            for ((k, v) in self.parameters) { q.put(k, v); }
+            let url = self.authorizeUrl();
+            return url + (Str.contains(url, "?") ? "&" : "?") + OAuthProvider.queryString(q);
+        }
+        // Back from the provider: who signed in (with their tokens).
+        fn user(req: Request) -> SocialUser {
+            let err = req.query("error", "");
+            if (err != "") { throw new OAuthException(err, req.query("error_description", err)); }
+            if (!self.isStateless) {
+                let sent = str(self.session(req).pull(self.key("state"), ""));
+                let got = req.query("state", "");
+                if (sent == "" || got == "" || !OAuthProvider.sameText(sent, got)) {
+                    throw new InvalidStateException("The sign-in state does not match; start again.");
+                }
+            }
+            let code = req.query("code", "");
+            if (code == "") { throw new OAuthException("invalid_request", "No authorization code came back."); }
+            let verifier = "";
+            if (self.usesPkce && !self.isStateless) { verifier = str(self.session(req).pull(self.key("verifier"), "")); }
+            let tokens = self.tokens(code, verifier);
+            return self.userFromTokens(tokens);
+        }
+        // Trades a code for tokens.
+        fn tokens(code: string, verifier: string = "") -> TokenSet {
+            let f = new HashMap<string, string>();
+            f.put("grant_type", "authorization_code");
+            f.put("code", code);
+            f.put("redirect_uri", self.redirectUrl);
+            if (verifier != "") { f.put("code_verifier", verifier); }
+            return self.tokenRequest(f);
+        }
+        // A fresh access token from a refresh token.
+        fn refresh(refreshToken: string) -> TokenSet {
+            let f = new HashMap<string, string>();
+            f.put("grant_type", "refresh_token");
+            f.put("refresh_token", refreshToken);
+            return self.tokenRequest(f);
+        }
+        // Who an access token belongs to (a token the app already has, from a mobile sign-in say).
+        fn userFromToken(token: string) -> SocialUser {
+            let t = new TokenSet();
+            t.accessToken = token;
+            return self.userFromTokens(t);
+        }
+        fn userFromTokens(t: TokenSet) -> SocialUser {
+            let u = self.mapUser(self.fetchUser(t.accessToken));
+            u.provider = self.name;
+            u.withTokens(t);
+            if (t.raw.isObject() && t.raw.has("id_token")) { u.raw.set("id_token", t.idToken); }
+            return u;
+        }
+
+        // ── helpers for providers ──────────────────────────────────────────────
+        fn tokenRequest(form: HashMap<string, string>) -> TokenSet {
+            let r = Fetch.asForm().acceptJson().timeoutMs(self.timeoutMs);
+            if (self.clientAuth == "basic") { r = r.withBasicAuth(self.clientId, self.clientSecret); }
+            else { form.put("client_id", self.clientId); form.put("client_secret", self.clientSecret); }
+            let res = r.post(self.tokenUrl(), form);
+            let j = OAuthProvider.bodyJson(res);
+            if (res.failed() || j.has("error") || j.getString("access_token", "") == "") {
+                throw new OAuthException(j.getString("error", "token_failed"),
+                    j.getString("error_description", j.getString("error", "The token request failed (HTTP " + str(res.status) + ").")));
+            }
+            return TokenSet.of(j, self.scopeSeparator);
+        }
+        // A GET with the token, as JSON (OAuthException when it fails).
+        fn getJson(url: string, token: string, headers: HashMap<string, string> = null) -> JsonValue {
+            let r = Fetch.withToken(token).acceptJson().timeoutMs(self.timeoutMs).withHeader("User-Agent", "apogee-socialite");
+            if (headers != null) { r = r.withHeaders(headers); }
+            let res = r.get(url);
+            if (res.failed()) { throw new OAuthException("user_failed", self.name + ": " + url + " answered HTTP " + str(res.status)); }
+            return OAuthProvider.bodyJson(res);
+        }
+        // A body as JSON, or a form-encoded one as an object.
+        static fn bodyJson(res: ClientResponse) -> JsonValue {
+            let j = Json.tryParse(res.body());
+            if (j != null) { return j; }
+            let o = Json.object();
+            for (pair in Str.split(res.body(), "&")) {
+                let eq = Str.indexOf(pair, "=");
+                if (eq > 0) { o.set(Url.decode(pair[..eq]), Url.decode(pair[eq + 1..])); }
+            }
+            return o;
+        }
+        private fn session(req: Request) -> Session {
+            if (!(req.session is Session)) { throw new StateError("Socialite needs a session (the session middleware), or stateless()."); }
+            return req.session as Session;
+        }
+        private fn key(what: string) -> string { return "socialite." + self.name + "." + what; }
+        // The S256 PKCE challenge of a verifier: base64url(sha256(verifier)).
+        static fn challenge(verifier: string) -> string {
+            let b = Base64.encodeBytes(Hex.decodeBytes(Hash.sha256(verifier)));
+            return Str.replace(Str.replace(Str.replace(b, "+", "-"), "/", "_"), "=", "");
+        }
+        static fn queryString(q: HashMap<string, string>) -> string {
+            let parts = new Array<string>();
+            let keys = q.keys();
+            keys.sortBy(fn(a: string, b: string) -> int { return Str.compare(a, b); });
+            for (k in keys) { parts.push(Url.encode(k) + "=" + Url.encode(q.get(k))); }
+            return Str.join(parts, "&");
+        }
+        // Whether two strings are equal, in time that does not depend on where they differ.
+        static fn sameText(a: string, b: string) -> bool {
+            if (a.length != b.length) { return false; }
+            let diff = 0;
+            for (i in 0..a.length) { diff = diff | (Str.charAt(a, i) ^ Str.charAt(b, i)); }
+            return diff == 0;
+        }
+        static fn str2(j: JsonValue, key: string) -> string {
+            let v = j.get(key);
+            if (v == null || v.isNull()) { return ""; }
+            return v.isString() ? v.asString() : v.toJson();
+        }
+    }
+}
