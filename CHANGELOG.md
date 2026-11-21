@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.1 (2026-11-21)
+
 - Laid out by `grav fmt` and tidied as grav 1.11's lints suggest (`isEmpty()`
   over `size() == 0`, compound assignments); no change in behaviour.
 
