@@ -1,0 +1,115 @@
+// socialite.grav — the providers by name, from configuration:
+//
+//   Socialite.configure("github", env("GITHUB_CLIENT_ID"), env("GITHUB_CLIENT_SECRET"), "https://app.test/auth/github/callback")
+//   Socialite.configure("microsoft", id, secret, redirect, {"tenant": "organizations"})
+//   Socialite.configure("okta", id, secret, redirect, {"issuer": "https://dev-1.okta.com/oauth2/default"})   // any OIDC issuer
+//   Socialite.extend("acme", fn(c: SocialiteConfig) -> OAuthProvider { return new AcmeProvider(c.clientId, c.clientSecret, c.redirect) })
+//
+//   Socialite.driver("github").setScopes(["read:user"]).redirect(req)
+//   Socialite.driver("github").user(req)
+//
+// In an app's tests, Socialite.fake("github", user) makes the provider skip
+// the round trip: redirect goes straight back to the callback, user() is `user`.
+import "std"
+import "apogee-http"
+import "provider.grav"
+import "providers.grav"
+
+namespace apogee {
+
+    class SocialiteConfig {
+        public name: string
+        public clientId: string
+        public clientSecret: string
+        public redirect: string
+        // Anything else a provider takes: "tenant" (microsoft), "host" (gitlab),
+        // "issuer" (an OIDC provider), "scopes" (space-separated), "driver".
+        public extra: HashMap<string, string>
+        constructor(name: string, clientId: string, clientSecret: string, redirect: string, extra: HashMap<string, string>) {
+            self.name = name; self.clientId = clientId; self.clientSecret = clientSecret; self.redirect = redirect; self.extra = extra;
+        }
+        fn get(key: string, fallback: string = "") -> string { return self.extra.getOr(key, fallback); }
+    }
+
+    // A provider that answers without the provider (Socialite.fake).
+    class FakeProvider extends OAuthProvider {
+        public fakeUser: SocialUser
+        constructor(name: string, user: SocialUser, redirectUrl: string) { super(name, "fake", "fake", redirectUrl); self.fakeUser = user; self.isStateless = true; }
+        fn redirectUrlFor(req: Request) -> string { return self.redirectUrl + (Str.contains(self.redirectUrl, "?") ? "&" : "?") + "code=fake"; }
+        fn user(req: Request) -> SocialUser {
+            let err = req.query("error", "");
+            if (err != "") { throw new OAuthException(err, req.query("error_description", err)); }
+            return self.userFromToken("fake-token");
+        }
+        fn userFromToken(token: string) -> SocialUser {
+            self.fakeUser.provider = self.name;
+            if (self.fakeUser.token == "") { self.fakeUser.token = token; }
+            return self.fakeUser;
+        }
+        fn refresh(refreshToken: string) -> TokenSet { let t = new TokenSet(); t.accessToken = "fake-token"; t.refreshToken = refreshToken; return t; }
+    }
+
+    class Socialite {
+        private static configs: HashMap<string, SocialiteConfig> = new HashMap<string, SocialiteConfig>()
+        private static creators: HashMap<string, fn(SocialiteConfig) -> OAuthProvider> = new HashMap<string, fn(SocialiteConfig) -> OAuthProvider>()
+        private static fakes: HashMap<string, SocialUser> = new HashMap<string, SocialUser>()
+
+        static fn configure(name: string, clientId: string, clientSecret: string, redirect: string, extra: HashMap<string, string> = null) {
+            Socialite.configs.put(name, new SocialiteConfig(name, clientId, clientSecret, redirect, extra == null ? new HashMap<string, string>() : extra));
+        }
+        // A provider of your own (or another way to build a built-in one).
+        static fn extend(name: string, create: fn(SocialiteConfig) -> OAuthProvider) { Socialite.creators.put(name, create); }
+        static fn has(name: string) -> bool { return Socialite.configs.containsKey(name) || Socialite.fakes.containsKey(name); }
+        static fn configured() -> Array<string> { return Socialite.configs.keys(); }
+
+        // A new provider for `name` (new each time, so per-request settings stay there).
+        static fn driver(name: string) -> OAuthProvider {
+            let c = Socialite.configs.getOr(name, null);
+            let f = Socialite.fakes.getOr(name, null);
+            if (f != null) { return new FakeProvider(name, f, c == null ? "/auth/" + name + "/callback" : c.redirect); }
+            if (c == null) { throw new ValueError("Socialite: no configuration for '" + name + "'"); }
+            let p = Socialite.build(c);
+            let scopes = c.get("scopes");
+            if (scopes != "") {
+                let s = new Array<string>();
+                for (x in Str.split(scopes, " ")) { if (x != "") { s.push(x); } }
+                p.setScopes(s);
+            }
+            return p;
+        }
+        private static fn build(c: SocialiteConfig) -> OAuthProvider {
+            let kind = c.get("driver", c.name);
+            let custom = Socialite.creators.getOr(kind, null);
+            if (custom != null) { return custom(c); }
+            switch (kind) {
+                case "github": return new GitHubProvider(c.clientId, c.clientSecret, c.redirect)
+                case "google": return new GoogleProvider(c.clientId, c.clientSecret, c.redirect)
+                case "microsoft": return new MicrosoftProvider(c.clientId, c.clientSecret, c.redirect, c.get("tenant", "common"))
+                case "gitlab": return new GitLabProvider(c.clientId, c.clientSecret, c.redirect, c.get("host", "https://gitlab.com"))
+                case "bitbucket": return new BitbucketProvider(c.clientId, c.clientSecret, c.redirect)
+                case "discord": return new DiscordProvider(c.clientId, c.clientSecret, c.redirect)
+                case "facebook": return new FacebookProvider(c.clientId, c.clientSecret, c.redirect)
+                case "linkedin": return new LinkedInProvider(c.clientId, c.clientSecret, c.redirect)
+                case "slack": return new SlackProvider(c.clientId, c.clientSecret, c.redirect)
+                default: {
+                    let issuer = c.get("issuer");
+                    if (issuer != "") { return new OidcProvider(c.name, issuer, c.clientId, c.clientSecret, c.redirect); }
+                    throw new ValueError("Socialite: no provider named '" + kind + "' (give an issuer for an OpenID Connect one, or extend())");
+                }
+            }
+        }
+
+        // ── testing an app ─────────────────────────────────────────────────────
+        static fn fake(name: string, user: SocialUser) { Socialite.fakes.put(name, user); }
+        static fn reset() { Socialite.fakes.clear(); }
+        // A user to fake with.
+        static fn makeUser(id: string, email: string, name: string = "") -> SocialUser {
+            let u = new SocialUser();
+            u.id = id;
+            u.email = email;
+            u.emailVerified = true;
+            u.name = name;
+            return u;
+        }
+    }
+}
