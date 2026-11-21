@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.1.0 (2026-11-21)
+
 - `OAuthProvider`: the OAuth 2 flow, with a state checked in constant time,
   PKCE (S256), refresh tokens, tokens the app already has, stateless use, and
   client auth in the body or as Basic.
