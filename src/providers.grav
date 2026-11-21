@@ -1,0 +1,280 @@
+// providers.grav — GitHub, Google, Microsoft, GitLab, Bitbucket, Discord,
+// Facebook, LinkedIn and Slack, and any OpenID Connect issuer by discovery
+// (Okta, Auth0, Keycloak, Authentik, Zitadel…). Each endpoint is a public
+// field, so a self-hosted instance (or a test server) can stand in.
+import "std"
+import "apogee-http-client"
+import "provider.grav"
+
+namespace apogee {
+
+    // The standard OpenID Connect claims (sub, name, email, picture…).
+    class OidcClaims {
+        static fn map(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "sub");
+            u.name = OAuthProvider.str2(j, "name");
+            u.nickname = OAuthProvider.str2(j, "preferred_username");
+            if (u.nickname == "") { u.nickname = OAuthProvider.str2(j, "nickname"); }
+            u.email = OAuthProvider.str2(j, "email");
+            let v = j.get("email_verified");
+            u.emailVerified = v != null && ((v.isBool() && v.asBool()) || (v.isString() && v.asString() == "true"));
+            u.avatar = OAuthProvider.str2(j, "picture");
+            return u;
+        }
+    }
+
+    class GitHubProvider extends OAuthProvider {
+        public authUrl: string = "https://github.com/login/oauth/authorize"
+        public tokUrl: string = "https://github.com/login/oauth/access_token"
+        public apiUrl: string = "https://api.github.com"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("github", clientId, clientSecret, redirectUrl); }
+        fn authorizeUrl() -> string { return self.authUrl; }
+        fn tokenUrl() -> string { return self.tokUrl; }
+        fn defaultScopes() -> Array<string> { return ["read:user", "user:email"]; }
+        fn fetchUser(token: string) -> JsonValue {
+            let h = new HashMap<string, string>();
+            h.put("Accept", "application/vnd.github+json");
+            let j = self.getJson(self.apiUrl + "/user", token, h);
+            // a private email is only in /user/emails (with the user:email scope)
+            let email = OAuthProvider.str2(j, "email");
+            j.set("email_verified", false);
+            try {
+                for (e in self.getJson(self.apiUrl + "/user/emails", token, h).asArray()) {
+                    let addr = OAuthProvider.str2(e, "email");
+                    let verified = e.has("verified") && e.get("verified").asBool();
+                    if ((email == "" && e.has("primary") && e.get("primary").asBool()) || (addr == email && verified)) {
+                        j.set("email", addr);
+                        j.set("email_verified", verified);
+                        if (email == "") { break; }
+                    }
+                }
+            } catch (x: OAuthException) {}
+            return j;
+        }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "id");
+            u.nickname = OAuthProvider.str2(j, "login");
+            u.name = OAuthProvider.str2(j, "name");
+            u.email = OAuthProvider.str2(j, "email");
+            u.emailVerified = j.has("email_verified") && j.get("email_verified").asBool();
+            u.avatar = OAuthProvider.str2(j, "avatar_url");
+            return u;
+        }
+    }
+
+    class GoogleProvider extends OAuthProvider {
+        public authUrl: string = "https://accounts.google.com/o/oauth2/v2/auth"
+        public tokUrl: string = "https://oauth2.googleapis.com/token"
+        public userUrl: string = "https://openidconnect.googleapis.com/v1/userinfo"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("google", clientId, clientSecret, redirectUrl); self.usesPkce = true; }
+        fn authorizeUrl() -> string { return self.authUrl; }
+        fn tokenUrl() -> string { return self.tokUrl; }
+        fn defaultScopes() -> Array<string> { return ["openid", "profile", "email"]; }
+        // A refresh token comes only with offline access (and, after the first time, a consent prompt).
+        fn offline() -> GoogleProvider { self.parameters.put("access_type", "offline"); self.parameters.put("prompt", "consent"); return self; }
+        // Only accounts of this Workspace domain (Google checks it on its page; check u.raw "hd" too).
+        fn domain(d: string) -> GoogleProvider { self.parameters.put("hd", d); return self; }
+        fn fetchUser(token: string) -> JsonValue { return self.getJson(self.userUrl, token); }
+        fn mapUser(j: JsonValue) -> SocialUser { return OidcClaims.map(j); }
+    }
+
+    // Microsoft accounts and Entra ID (Azure AD). Tenant "common", "organizations",
+    // "consumers", or a tenant id.
+    class MicrosoftProvider extends OAuthProvider {
+        public tenant: string
+        public loginUrl: string = "https://login.microsoftonline.com"
+        public graphUrl: string = "https://graph.microsoft.com/v1.0"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string, tenant: string = "common") {
+            super("microsoft", clientId, clientSecret, redirectUrl);
+            self.tenant = tenant;
+            self.usesPkce = true;
+        }
+        fn authorizeUrl() -> string { return self.loginUrl + "/" + self.tenant + "/oauth2/v2.0/authorize"; }
+        fn tokenUrl() -> string { return self.loginUrl + "/" + self.tenant + "/oauth2/v2.0/token"; }
+        fn defaultScopes() -> Array<string> { return ["openid", "profile", "email", "offline_access", "User.Read"]; }
+        fn fetchUser(token: string) -> JsonValue { return self.getJson(self.graphUrl + "/me", token); }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "id");
+            u.name = OAuthProvider.str2(j, "displayName");
+            u.email = OAuthProvider.str2(j, "mail");
+            u.nickname = OAuthProvider.str2(j, "userPrincipalName");
+            if (u.email == "") { u.email = u.nickname; }
+            return u;
+        }
+    }
+
+    class GitLabProvider extends OAuthProvider {
+        // gitlab.com, or a self-hosted instance.
+        public host: string
+        constructor(clientId: string, clientSecret: string, redirectUrl: string, host: string = "https://gitlab.com") {
+            super("gitlab", clientId, clientSecret, redirectUrl);
+            self.host = host;
+            self.usesPkce = true;
+        }
+        fn authorizeUrl() -> string { return self.host + "/oauth/authorize"; }
+        fn tokenUrl() -> string { return self.host + "/oauth/token"; }
+        fn defaultScopes() -> Array<string> { return ["read_user"]; }
+        fn fetchUser(token: string) -> JsonValue { return self.getJson(self.host + "/api/v4/user", token); }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "id");
+            u.nickname = OAuthProvider.str2(j, "username");
+            u.name = OAuthProvider.str2(j, "name");
+            u.email = OAuthProvider.str2(j, "email");
+            u.emailVerified = OAuthProvider.str2(j, "confirmed_at") != "";
+            u.avatar = OAuthProvider.str2(j, "avatar_url");
+            return u;
+        }
+    }
+
+    class BitbucketProvider extends OAuthProvider {
+        public authUrl: string = "https://bitbucket.org/site/oauth2/authorize"
+        public tokUrl: string = "https://bitbucket.org/site/oauth2/access_token"
+        public apiUrl: string = "https://api.bitbucket.org/2.0"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("bitbucket", clientId, clientSecret, redirectUrl); self.clientAuth = "basic"; }
+        fn authorizeUrl() -> string { return self.authUrl; }
+        fn tokenUrl() -> string { return self.tokUrl; }
+        fn defaultScopes() -> Array<string> { return ["account", "email"]; }
+        fn fetchUser(token: string) -> JsonValue {
+            let j = self.getJson(self.apiUrl + "/user", token);
+            try {
+                let emails = self.getJson(self.apiUrl + "/user/emails", token);
+                if (emails.has("values")) {
+                    for (e in emails.get("values").asArray()) {
+                        if (e.has("is_primary") && e.get("is_primary").asBool()) {
+                            j.set("email", OAuthProvider.str2(e, "email"));
+                            j.set("email_verified", e.has("is_confirmed") && e.get("is_confirmed").asBool());
+                        }
+                    }
+                }
+            } catch (x: OAuthException) {}
+            return j;
+        }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "uuid");
+            u.nickname = OAuthProvider.str2(j, "username");
+            u.name = OAuthProvider.str2(j, "display_name");
+            u.email = OAuthProvider.str2(j, "email");
+            u.emailVerified = j.has("email_verified") && j.get("email_verified").asBool();
+            let links = j.get("links");
+            if (links != null && links.has("avatar")) { u.avatar = OAuthProvider.str2(links.get("avatar"), "href"); }
+            return u;
+        }
+    }
+
+    class DiscordProvider extends OAuthProvider {
+        public authUrl: string = "https://discord.com/oauth2/authorize"
+        public apiUrl: string = "https://discord.com/api"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("discord", clientId, clientSecret, redirectUrl); self.usesPkce = true; }
+        fn authorizeUrl() -> string { return self.authUrl; }
+        fn tokenUrl() -> string { return self.apiUrl + "/oauth2/token"; }
+        fn defaultScopes() -> Array<string> { return ["identify", "email"]; }
+        fn fetchUser(token: string) -> JsonValue { return self.getJson(self.apiUrl + "/users/@me", token); }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "id");
+            u.nickname = OAuthProvider.str2(j, "username");
+            u.name = OAuthProvider.str2(j, "global_name");
+            if (u.name == "") { u.name = u.nickname; }
+            u.email = OAuthProvider.str2(j, "email");
+            u.emailVerified = j.has("verified") && j.get("verified").asBool();
+            let avatar = OAuthProvider.str2(j, "avatar");
+            if (avatar != "") { u.avatar = "https://cdn.discordapp.com/avatars/" + u.id + "/" + avatar + ".png"; }
+            return u;
+        }
+    }
+
+    class FacebookProvider extends OAuthProvider {
+        public version: string = "v19.0"
+        public dialogUrl: string = "https://www.facebook.com"
+        public graphUrl: string = "https://graph.facebook.com"
+        public fields: Array<string> = ["id", "name", "email", "picture.type(large)"]
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("facebook", clientId, clientSecret, redirectUrl); self.scopeSeparator = ","; }
+        fn authorizeUrl() -> string { return self.dialogUrl + "/" + self.version + "/dialog/oauth"; }
+        fn tokenUrl() -> string { return self.graphUrl + "/" + self.version + "/oauth/access_token"; }
+        fn defaultScopes() -> Array<string> { return ["email", "public_profile"]; }
+        fn fetchUser(token: string) -> JsonValue {
+            // (appsecret_proof: proves the call comes from the app, as Facebook can require)
+            return self.getJson(self.graphUrl + "/" + self.version + "/me?fields=" + Url.encode(Str.join(self.fields, ",")) +
+                                "&appsecret_proof=" + Hash.hmacSha256(self.clientSecret, token), token);
+        }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            let u = new SocialUser();
+            u.raw = j;
+            u.id = OAuthProvider.str2(j, "id");
+            u.name = OAuthProvider.str2(j, "name");
+            u.email = OAuthProvider.str2(j, "email");
+            u.emailVerified = u.email != "";
+            let p = j.get("picture");
+            if (p != null && p.has("data")) { u.avatar = OAuthProvider.str2(p.get("data"), "url"); }
+            return u;
+        }
+    }
+
+    // LinkedIn's "Sign In with LinkedIn using OpenID Connect".
+    class LinkedInProvider extends OAuthProvider {
+        public authUrl: string = "https://www.linkedin.com/oauth/v2/authorization"
+        public tokUrl: string = "https://www.linkedin.com/oauth/v2/accessToken"
+        public userUrl: string = "https://api.linkedin.com/v2/userinfo"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("linkedin", clientId, clientSecret, redirectUrl); }
+        fn authorizeUrl() -> string { return self.authUrl; }
+        fn tokenUrl() -> string { return self.tokUrl; }
+        fn defaultScopes() -> Array<string> { return ["openid", "profile", "email"]; }
+        fn fetchUser(token: string) -> JsonValue { return self.getJson(self.userUrl, token); }
+        fn mapUser(j: JsonValue) -> SocialUser { return OidcClaims.map(j); }
+    }
+
+    // "Sign in with Slack" (OpenID Connect).
+    class SlackProvider extends OAuthProvider {
+        public authUrl: string = "https://slack.com/openid/connect/authorize"
+        public apiUrl: string = "https://slack.com/api"
+        constructor(clientId: string, clientSecret: string, redirectUrl: string) { super("slack", clientId, clientSecret, redirectUrl); }
+        fn authorizeUrl() -> string { return self.authUrl; }
+        fn tokenUrl() -> string { return self.apiUrl + "/openid.connect.token"; }
+        fn defaultScopes() -> Array<string> { return ["openid", "profile", "email"]; }
+        fn fetchUser(token: string) -> JsonValue {
+            let j = self.getJson(self.apiUrl + "/openid.connect.userInfo", token);
+            if (j.has("ok") && !j.get("ok").asBool()) { throw new OAuthException(OAuthProvider.str2(j, "error"), "slack: " + OAuthProvider.str2(j, "error")); }
+            return j;
+        }
+        fn mapUser(j: JsonValue) -> SocialUser { return OidcClaims.map(j); }
+    }
+
+    // Any OpenID Connect issuer: its endpoints come from
+    // {issuer}/.well-known/openid-configuration (fetched once).
+    class OidcProvider extends OAuthProvider {
+        public issuer: string
+        private discovered: JsonValue = null
+        constructor(name: string, issuer: string, clientId: string, clientSecret: string, redirectUrl: string) {
+            super(name, clientId, clientSecret, redirectUrl);
+            self.issuer = Str.endsWith(issuer, "/") ? issuer[..issuer.length - 1] : issuer;
+            self.usesPkce = true;
+        }
+        // The issuer's discovery document.
+        fn configuration() -> JsonValue {
+            if (self.discovered == null) {
+                let res = Fetch.acceptJson().timeoutMs(self.timeoutMs).get(self.issuer + "/.well-known/openid-configuration");
+                if (res.failed()) { throw new OAuthException("discovery_failed", self.name + ": discovery answered HTTP " + str(res.status)); }
+                let j = res.json();
+                if (j.getString("issuer", "") != self.issuer) { throw new OAuthException("discovery_failed", self.name + ": the discovery document names another issuer"); }
+                self.discovered = j;
+            }
+            return self.discovered;
+        }
+        fn authorizeUrl() -> string { return self.configuration().getString("authorization_endpoint", ""); }
+        fn tokenUrl() -> string { return self.configuration().getString("token_endpoint", ""); }
+        fn defaultScopes() -> Array<string> { return ["openid", "profile", "email"]; }
+        fn fetchUser(token: string) -> JsonValue { return self.getJson(self.configuration().getString("userinfo_endpoint", ""), token); }
+        fn mapUser(j: JsonValue) -> SocialUser { return OidcClaims.map(j); }
+    }
+}
