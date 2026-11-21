@@ -178,8 +178,8 @@ namespace apogee {
             q.put("client_id", self.clientId);
             q.put("redirect_uri", self.redirectUrl);
             q.put("response_type", "code");
-            let scopes = self.scopes.size() > 0 ? self.scopes : self.defaultScopes();
-            if (scopes.size() > 0) { q.put("scope", Str.join(scopes, self.scopeSeparator)); }
+            let scopes = !self.scopes.isEmpty() ? self.scopes : self.defaultScopes();
+            if (!scopes.isEmpty()) { q.put("scope", Str.join(scopes, self.scopeSeparator)); }
             if (!self.isStateless) {
                 let state = Hash.randomToken(20);
                 q.put("state", state);
