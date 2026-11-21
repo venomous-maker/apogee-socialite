@@ -16,16 +16,25 @@ namespace apogee {
 
     // The state that came back is not the one sent (or the session lost it).
     class InvalidStateException extends Exception {
-        constructor(msg: string) { super(msg); }
-        fn kind() -> string { return "InvalidStateException"; }
+        constructor(msg: string) {
+            super(msg);
+        }
+        fn kind() -> string {
+            return "InvalidStateException";
+        }
     }
 
     // The provider said no: the user denied access, the code was bad, or a call failed.
     class OAuthException extends Exception {
         // The provider's error code ("access_denied", "invalid_grant"…), when it gave one.
         public error: string
-        constructor(error: string, msg: string) { super(msg); self.error = error; }
-        fn kind() -> string { return "OAuthException"; }
+        constructor(error: string, msg: string) {
+            super(msg)
+            self.error = error
+        }
+        fn kind() -> string {
+            return "OAuthException";
+        }
     }
 
     // What a token endpoint answered.
@@ -115,28 +124,55 @@ namespace apogee {
         }
 
         // ── what each provider says ────────────────────────────────────────────
-        fn authorizeUrl() -> string { throw new StateError(self.name + ": no authorize URL"); }
-        fn tokenUrl() -> string { throw new StateError(self.name + ": no token URL"); }
+        fn authorizeUrl() -> string {
+            throw new StateError(self.name + ": no authorize URL");
+        }
+        fn tokenUrl() -> string {
+            throw new StateError(self.name + ": no token URL");
+        }
         // Who the token belongs to, as the provider's JSON.
-        fn fetchUser(token: string) -> JsonValue { throw new StateError(self.name + ": cannot fetch the user"); }
-        fn mapUser(j: JsonValue) -> SocialUser { throw new StateError(self.name + ": cannot read the user"); }
+        fn fetchUser(token: string) -> JsonValue {
+            throw new StateError(self.name + ": cannot fetch the user");
+        }
+        fn mapUser(j: JsonValue) -> SocialUser {
+            throw new StateError(self.name + ": cannot read the user");
+        }
         // Scopes asked for when none are set.
-        fn defaultScopes() -> Array<string> { return new Array<string>(); }
+        fn defaultScopes() -> Array<string> {
+            return new Array<string>();
+        }
 
         // ── settings, chained ──────────────────────────────────────────────────
-        fn setScopes(s: Array<string>) -> OAuthProvider { self.scopes = s.copy(); return self; }
+        fn setScopes(s: Array<string>) -> OAuthProvider {
+            self.scopes = s.copy()
+            return self
+        }
         fn addScopes(s: Array<string>) -> OAuthProvider {
             for (x in s) { if (!self.scopes.contains(x)) { self.scopes.push(x); } }
             return self;
         }
-        fn with(params: HashMap<string, string>) -> OAuthProvider { for ((k, v) in params) { self.parameters.put(k, v); } return self; }
-        fn stateless() -> OAuthProvider { self.isStateless = true; return self; }
-        fn redirectTo(url: string) -> OAuthProvider { self.redirectUrl = url; return self; }
-        fn withPkce(on: bool = true) -> OAuthProvider { self.usesPkce = on; return self; }
+        fn with(params: HashMap<string, string>) -> OAuthProvider {
+            for ((k, v) in params) { self.parameters.put(k, v); }
+            return self;
+        }
+        fn stateless() -> OAuthProvider {
+            self.isStateless = true
+            return self
+        }
+        fn redirectTo(url: string) -> OAuthProvider {
+            self.redirectUrl = url
+            return self
+        }
+        fn withPkce(on: bool = true) -> OAuthProvider {
+            self.usesPkce = on
+            return self
+        }
 
         // ── the flow ───────────────────────────────────────────────────────────
         // Where to send the browser (and what to remember in the session).
-        fn redirect(req: Request) -> Response { return Response.redirect(self.redirectUrlFor(req)); }
+        fn redirect(req: Request) -> Response {
+            return Response.redirect(self.redirectUrlFor(req));
+        }
         fn redirectUrlFor(req: Request) -> string {
             let q = new HashMap<string, string>();
             q.put("client_id", self.clientId);
@@ -212,7 +248,10 @@ namespace apogee {
         fn tokenRequest(form: HashMap<string, string>) -> TokenSet {
             let r = Fetch.asForm().acceptJson().timeoutMs(self.timeoutMs);
             if (self.clientAuth == "basic") { r = r.withBasicAuth(self.clientId, self.clientSecret); }
-            else { form.put("client_id", self.clientId); form.put("client_secret", self.clientSecret); }
+            else {
+                form.put("client_id", self.clientId)
+                form.put("client_secret", self.clientSecret)
+            }
             let res = r.post(self.tokenUrl(), form);
             let j = OAuthProvider.bodyJson(res);
             if (res.failed() || j.has("error") || j.getString("access_token", "") == "") {
@@ -244,7 +283,9 @@ namespace apogee {
             if (!(req.session is Session)) { throw new StateError("Socialite needs a session (the session middleware), or stateless()."); }
             return req.session as Session;
         }
-        private fn key(what: string) -> string { return "socialite." + self.name + "." + what; }
+        private fn key(what: string) -> string {
+            return "socialite." + self.name + "." + what;
+        }
         // The S256 PKCE challenge of a verifier: base64url(sha256(verifier)).
         static fn challenge(verifier: string) -> string {
             let b = Base64.encodeBytes(Hex.decodeBytes(Hash.sha256(verifier)));

@@ -28,14 +28,22 @@ namespace apogee {
         constructor(name: string, clientId: string, clientSecret: string, redirect: string, extra: HashMap<string, string>) {
             self.name = name; self.clientId = clientId; self.clientSecret = clientSecret; self.redirect = redirect; self.extra = extra;
         }
-        fn get(key: string, fallback: string = "") -> string { return self.extra.getOr(key, fallback); }
+        fn get(key: string, fallback: string = "") -> string {
+            return self.extra.getOr(key, fallback);
+        }
     }
 
     // A provider that answers without the provider (Socialite.fake).
     class FakeProvider extends OAuthProvider {
         public fakeUser: SocialUser
-        constructor(name: string, user: SocialUser, redirectUrl: string) { super(name, "fake", "fake", redirectUrl); self.fakeUser = user; self.isStateless = true; }
-        fn redirectUrlFor(req: Request) -> string { return self.redirectUrl + (Str.contains(self.redirectUrl, "?") ? "&" : "?") + "code=fake"; }
+        constructor(name: string, user: SocialUser, redirectUrl: string) {
+            super(name, "fake", "fake", redirectUrl)
+            self.fakeUser = user
+            self.isStateless = true
+        }
+        fn redirectUrlFor(req: Request) -> string {
+            return self.redirectUrl + (Str.contains(self.redirectUrl, "?") ? "&" : "?") + "code=fake";
+        }
         fn user(req: Request) -> SocialUser {
             let err = req.query("error", "");
             if (err != "") { throw new OAuthException(err, req.query("error_description", err)); }
@@ -46,7 +54,12 @@ namespace apogee {
             if (self.fakeUser.token == "") { self.fakeUser.token = token; }
             return self.fakeUser;
         }
-        fn refresh(refreshToken: string) -> TokenSet { let t = new TokenSet(); t.accessToken = "fake-token"; t.refreshToken = refreshToken; return t; }
+        fn refresh(refreshToken: string) -> TokenSet {
+            let t = new TokenSet()
+            t.accessToken = "fake-token"
+            t.refreshToken = refreshToken
+            return t
+        }
     }
 
     class Socialite {
@@ -58,9 +71,15 @@ namespace apogee {
             Socialite.configs.put(name, new SocialiteConfig(name, clientId, clientSecret, redirect, extra == null ? new HashMap<string, string>() : extra));
         }
         // A provider of your own (or another way to build a built-in one).
-        static fn extend(name: string, create: fn(SocialiteConfig) -> OAuthProvider) { Socialite.creators.put(name, create); }
-        static fn has(name: string) -> bool { return Socialite.configs.containsKey(name) || Socialite.fakes.containsKey(name); }
-        static fn configured() -> Array<string> { return Socialite.configs.keys(); }
+        static fn extend(name: string, create: fn(SocialiteConfig) -> OAuthProvider) {
+            Socialite.creators.put(name, create);
+        }
+        static fn has(name: string) -> bool {
+            return Socialite.configs.containsKey(name) || Socialite.fakes.containsKey(name);
+        }
+        static fn configured() -> Array<string> {
+            return Socialite.configs.keys();
+        }
 
         // A new provider for `name` (new each time, so per-request settings stay there).
         static fn driver(name: string) -> OAuthProvider {
@@ -100,8 +119,12 @@ namespace apogee {
         }
 
         // ── testing an app ─────────────────────────────────────────────────────
-        static fn fake(name: string, user: SocialUser) { Socialite.fakes.put(name, user); }
-        static fn reset() { Socialite.fakes.clear(); }
+        static fn fake(name: string, user: SocialUser) {
+            Socialite.fakes.put(name, user);
+        }
+        static fn reset() {
+            Socialite.fakes.clear();
+        }
         // A user to fake with.
         static fn makeUser(id: string, email: string, name: string = "") -> SocialUser {
             let u = new SocialUser();

@@ -59,14 +59,26 @@ class Idp {
             Idp.lock.lock()
             if (f.getOr("grant_type", "") == "refresh_token") {
                 let rt = f.getOr("refresh_token", "")
-                if (!Idp.refreshTokens.contains(rt)) { Idp.lock.unlock(); return Idp.bad("invalid_grant") }
+                if (!Idp.refreshTokens.contains(rt)) {
+                    Idp.lock.unlock()
+                    return Idp.bad("invalid_grant")
+                }
             } else {
                 let code = f.getOr("code", "")
-                if (!Idp.codes.containsKey(code)) { Idp.lock.unlock(); return Idp.bad("invalid_grant") }
+                if (!Idp.codes.containsKey(code)) {
+                    Idp.lock.unlock()
+                    return Idp.bad("invalid_grant")
+                }
                 let challenge = Idp.codes.get(code)
                 Idp.codes.remove(code)                                   // a code works once
-                if (challenge != "" && OAuthProvider.challenge(f.getOr("code_verifier", "")) != challenge) { Idp.lock.unlock(); return Idp.bad("invalid_grant") }
-                if (f.getOr("redirect_uri", "") == "") { Idp.lock.unlock(); return Idp.bad("invalid_request") }
+                if (challenge != "" && OAuthProvider.challenge(f.getOr("code_verifier", "")) != challenge) {
+                    Idp.lock.unlock()
+                    return Idp.bad("invalid_grant")
+                }
+                if (f.getOr("redirect_uri", "") == "") {
+                    Idp.lock.unlock()
+                    return Idp.bad("invalid_request")
+                }
             }
             let at = "at-" + Hash.randomToken(8)
             let rt = "rt-" + Hash.randomToken(8)
