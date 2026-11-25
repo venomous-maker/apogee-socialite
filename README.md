@@ -29,6 +29,21 @@ router.middleware(["session"]).group(fn(r: Router) {
 })
 ```
 
+## In an apogee-framework app
+
+Importing the module is all it takes: `SocialitePackage` (apogee-package) connects it when
+the app is created. Each provider with a client id under `services.<name>` is configured; the redirect defaults to `APP_URL/auth/<name>/callback`. Providers: github, google, microsoft, gitlab, bitbucket, discord, facebook, linkedin, slack, oidc.
+
+| Setting | Default |
+|---|---|
+| `services.<name>.client_id`, `.client_secret`, `.redirect` | `<NAME>_CLIENT_ID`, `<NAME>_CLIENT_SECRET`, `<NAME>_REDIRECT_URI` |
+| `services.microsoft.tenant` | `MICROSOFT_TENANT`, `common` |
+| `services.gitlab.host` | `GITLAB_HOST`, `https://gitlab.com` |
+| `services.oidc.issuer` | `OIDC_ISSUER` |
+| `services.<name>.scopes` | extra scopes, comma-separated |
+
+Your own configuration wins over these defaults.
+
 ## What it checks
 
 - **State.** `redirect` puts a random state in the URL and the session.
@@ -86,6 +101,7 @@ Socialite.reset()
 
 ```sh
 grav test tests/socialite.grav
+grav test tests/package.grav
 ```
 
 They run the whole sign-in through the router and a session against a local
