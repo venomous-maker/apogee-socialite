@@ -1,0 +1,43 @@
+// package.grav — how apogee-socialite connects itself to an app
+// (apogee-package): each provider under services.<name> with a client id is
+// configured (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_REDIRECT_URI…).
+import "std"
+import "apogee-config"
+import "apogee-package"
+import "socialite.grav"
+
+namespace apogee {
+
+    class SocialitePackage extends ApogeePackage {
+        constructor() {}
+        fn name() -> string { return "socialite"; }
+        static fn providers() -> Array<string> { return ["github", "google", "microsoft", "gitlab", "bitbucket", "discord", "facebook", "linkedin", "slack", "oidc"]; }
+        fn defaults() -> HashMap<string, any> {
+            let out = new HashMap<string, any>();
+            let url = Env.get("APP_URL", "http://localhost:8000");
+            for (name in SocialitePackage.providers()) {
+                let up = Str.upper(name);
+                out.put("services." + name + ".client_id", Env.get(up + "_CLIENT_ID", ""));
+                out.put("services." + name + ".client_secret", Env.get(up + "_CLIENT_SECRET", ""));
+                out.put("services." + name + ".redirect", Env.get(up + "_REDIRECT_URI", url + "/auth/" + name + "/callback"));
+            }
+            out.put("services.microsoft.tenant", Env.get("MICROSOFT_TENANT", "common"));
+            out.put("services.gitlab.host", Env.get("GITLAB_HOST", "https://gitlab.com"));
+            out.put("services.oidc.issuer", Env.get("OIDC_ISSUER", ""));
+            return out;
+        }
+        fn register(app: PackageContext) {
+            for (name in SocialitePackage.providers()) {
+                let b = "services." + name + ".";
+                let id = Config.getString(b + "client_id");
+                if (id == "") { continue; }
+                let extra = new HashMap<string, string>();
+                for (k in ["tenant", "host", "issuer", "scopes"]) {
+                    let v = Config.getString(b + k)
+                    if (v != "") { extra.put(k, v); }
+                }
+                Socialite.configure(name, id, Config.getString(b + "client_secret"), Config.getString(b + "redirect"), extra);
+            }
+        }
+    }
+}

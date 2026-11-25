@@ -2,3 +2,4 @@
 import "provider.grav"
 import "providers.grav"
 import "socialite.grav"
+import "package.grav"
