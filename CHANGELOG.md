@@ -6,6 +6,11 @@ compiler versions it builds with.
 
 ## Unreleased
 
+Needs grav 1.12.0 or newer.
+
+- `SocialitePackage`: the module connects itself to an apogee-framework app (apogee-package):
+  its settings, wiring moved here from the framework.
+
 ## 0.1.1 (2026-11-21)
 
 - Laid out by `grav fmt` and tidied as grav 1.11's lints suggest (`isEmpty()`
