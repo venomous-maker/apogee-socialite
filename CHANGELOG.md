@@ -11,6 +11,10 @@ Needs grav 1.12.0 or newer.
 - `SocialitePackage`: the module connects itself to an apogee-framework app (apogee-package):
   its settings, wiring moved here from the framework.
 
+### Dependencies
+
+- Uses apogee-package 0.1.0, apogee-http 0.3.0, apogee-session 0.2.2, apogee-http-client 0.2.0, apogee-routing 0.3.0, apogee-testing 0.1.1 (from their GitHub tags).
+
 ## 0.1.1 (2026-11-21)
 
 - Laid out by `grav fmt` and tidied as grav 1.11's lints suggest (`isEmpty()`
