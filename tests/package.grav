@@ -1,0 +1,19 @@
+// SocialitePackage: each provider with a client id is configured.
+import "std"
+import "apogee-container"
+import "apogee-config"
+import "apogee-package"
+import "../src/all.grav"
+use apogee.*
+
+test "the package connects itself" {
+    let ps = Packages.discover()
+    assertEq(ps[0].name(), "socialite")
+    Config.set("services.github.client_id", "abc")
+    Config.set("services.github.client_secret", "shh")
+    Packages.applyDefaults(ps)
+    assertEq(Config.getString("services.github.redirect"), "http://localhost:8000/auth/github/callback")
+    ps[0].register(new PackageContext(new Container(), "testing", ""))
+    assert(Socialite.has("github"))
+    assert(!Socialite.has("google"))
+}
