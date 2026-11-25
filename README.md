@@ -7,7 +7,7 @@ OpenID Connect issuer by discovery (Okta, Auth0, Keycloak, Authentik,
 Zitadel…). Built on [apogee-http-client](https://github.com/venomous-maker/apogee-http-client)
 and [apogee-session](https://github.com/venomous-maker/apogee-session).
 
-```grav
+```typescript
 import "std"
 import "apogee-socialite"
 use apogee.*
@@ -57,7 +57,7 @@ Your own configuration wins over these defaults.
 
 ## Settings, per request
 
-```grav
+```typescript
 Socialite.driver("github").setScopes(["read:user"]).redirect(req)
 Socialite.driver("google").addScopes(["https://www.googleapis.com/auth/calendar.readonly"])
 (Socialite.driver("google") as GoogleProvider).offline().domain("example.com")   // a refresh token; one Workspace domain
@@ -90,7 +90,7 @@ can stand in.
 
 ## Testing an app
 
-```grav
+```typescript
 Socialite.fake("github", Socialite.makeUser("9", "faye@app.test", "Faye"))
 client.get("/auth/github")                    // redirects straight to the callback with ?code=fake
 client.get("/auth/github/callback?code=fake") // user() is the fake user
