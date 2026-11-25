@@ -7,3 +7,6 @@ apogee-http-client = { source = "github.com/venomous-maker/apogee-http-client", 
 apogee-container = { source = "github.com/venomous-maker/apogee-container", version = "v0.2.0", commit = "f027cc66880e602a500174bf3f28fe6d943f727a" }
 apogee-routing = { source = "github.com/venomous-maker/apogee-routing", version = "v0.2.0", commit = "4539318d0ed9b7e7e41805bbdfa945ecbd4a62a7" }
 apogee-testing = { source = "github.com/venomous-maker/apogee-testing", version = "v0.1.0", commit = "fa33ed2dd67574a998a7b69c7f0457308599055a" }
+apogee-auth = { source = "github.com/venomous-maker/apogee-auth", version = "v0.2.1", commit = "83cc21495223a4a838aa5f8b303276823b839b32" }
+grav-db = { source = "github.com/venomous-maker/grav-db", version = "v0.2.0", commit = "8d60a239249f8533d750d70625baa0a33b991cfd" }
+apogee-config = { source = "github.com/venomous-maker/apogee-config", version = "v0.2.0", commit = "0d452e5b9098cec8b925a752a219b750e24fe00d" }
