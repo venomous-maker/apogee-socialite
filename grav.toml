@@ -4,10 +4,10 @@ grav = ">=1.12.0"
 paths = ["src"]
 
 [dependencies]
-apogee-package = "github.com/venomous-maker/apogee-package@v0.1.1"
+apogee-package = "github.com/venomous-maker/apogee-package@v0.1.2"
 apogee-config = "github.com/venomous-maker/apogee-config@v0.2.0"
 apogee-http = "github.com/venomous-maker/apogee-http@v0.3.0"
-apogee-session = "github.com/venomous-maker/apogee-session@v0.2.2"
+apogee-session = "github.com/venomous-maker/apogee-session@v0.2.3"
 apogee-http-client = "github.com/venomous-maker/apogee-http-client@v0.2.0"
 # (the tests drive the sign-in through the router)
 apogee-container = "github.com/venomous-maker/apogee-container@v0.2.0"
